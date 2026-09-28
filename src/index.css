@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@keyframes scanner {
+  0% {
+    transform: translateY(0);
+    opacity: 0.3;
+  }
+  50% {
+    transform: translateY(520px);
+    opacity: 0.95;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 0.3;
+  }
+}

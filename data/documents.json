@@ -1,0 +1,22 @@
+[
+  {
+    "id": "doc_demo_invoice_01",
+    "title": "Invoice_PT_Mitra_Nusantara_8841.pdf",
+    "pageCount": 1,
+    "thumbnailUrl": "",
+    "createdAt": "2026-09-28T09:15:00.000Z",
+    "pdfSizeKb": 320,
+    "deviceSource": "Smartphone (Android)",
+    "category": "Invoice"
+  },
+  {
+    "id": "doc_demo_cert_02",
+    "title": "Sertifikat_Komputer_Visi_2026.pdf",
+    "pageCount": 1,
+    "thumbnailUrl": "",
+    "createdAt": "2026-09-28T08:45:00.000Z",
+    "pdfSizeKb": 410,
+    "deviceSource": "Laptop (Mac Desktop)",
+    "category": "Sertifikat"
+  }
+]

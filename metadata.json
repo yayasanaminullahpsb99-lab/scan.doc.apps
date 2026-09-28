@@ -1,0 +1,10 @@
+{
+  "name": "scandocapp",
+  "description": "Pemindaian dokumen cerdas, deteksi tepi otomatis, koreksi perspektif 4 sudut, filter Magic Color, OCR, dan konversi PDF multi-halaman.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
