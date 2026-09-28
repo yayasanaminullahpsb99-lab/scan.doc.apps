@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ScannedDocument } from '../types/scanner';
 import {
   getSavedDocuments,
+  fetchDocumentsCrossDevice,
   deleteDocumentFromStorage,
   renameDocumentInStorage,
   formatFileSize
@@ -35,18 +36,27 @@ export const SavedDocsModal: React.FC<SavedDocsModalProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
 
-  const refreshList = () => {
-    setDocuments(getSavedDocuments());
+  const refreshList = async () => {
+    const local = getSavedDocuments();
+    setDocuments(local);
+    try {
+      const serverDocs = await fetchDocumentsCrossDevice();
+      if (serverDocs && serverDocs.length > 0) {
+        setDocuments(serverDocs);
+      }
+    } catch {
+      // ignore
+    }
   };
 
   useEffect(() => {
     refreshList();
   }, []);
 
-  const handleDelete = (id: string, e: React.MouseEvent) => {
+  const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirm('Apakah Anda yakin ingin menghapus dokumen ini dari penyimpanan lokal?')) {
-      deleteDocumentFromStorage(id);
+    if (confirm('Apakah Anda yakin ingin menghapus dokumen ini?')) {
+      await deleteDocumentFromStorage(id);
       refreshList();
     }
   };
@@ -57,10 +67,10 @@ export const SavedDocsModal: React.FC<SavedDocsModalProps> = ({
     setEditTitle(doc.title.replace(/\.pdf$/i, ''));
   };
 
-  const handleSaveRename = (id: string, e: React.FormEvent) => {
+  const handleSaveRename = async (id: string, e: React.FormEvent) => {
     e.preventDefault();
     if (editTitle.trim()) {
-      renameDocumentInStorage(id, editTitle.trim());
+      await renameDocumentInStorage(id, editTitle.trim());
       setEditingId(null);
       refreshList();
     }
