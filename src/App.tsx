@@ -1,481 +1,688 @@
-import React, { useState, useEffect } from 'react';
-import { PageItem, Quad, ScannedDocument, FilterType } from './types/scanner';
-import { warpPerspective, getDefaultQuad, detectDocumentCorners, applyFilter, generateThumbnail } from './utils/cvEngine';
-import { fetchDocumentsCrossDevice } from './utils/storage';
-import { CameraView } from './components/CameraView';
-import { CropEditor } from './components/CropEditor';
-import { FilterEditor } from './components/FilterEditor';
-import { PageListManager } from './components/PageListManager';
-import { PdfExportModal } from './components/PdfExportModal';
-import { SavedDocsModal } from './components/SavedDocsModal';
-import { DriveBackupModal } from './components/DriveBackupModal';
-import { DocumentDirectoryView } from './components/DocumentDirectoryView';
-import { Camera, FolderOpen, Layers, CheckCircle2, Sparkles, ImagePlus, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { ALL_LEVELS, TIERS } from './data/levels';
+import { LevelData, PlayerStats, PuzzleTier } from './types/game';
+import {
+  loadPlayerStats,
+  savePlayerStats,
+  calculateTotalStars,
+  calculateStarRating,
+} from './utils/gameState';
+import {
+  playTap,
+  playCorrect,
+  playWrong,
+  playCoin,
+} from './utils/sfx';
 
-type AppStep = 'camera' | 'crop' | 'filter' | 'pages' | 'directory';
+import { GameHeader } from './components/GameHeader';
+import { LevelSelectMap } from './components/LevelSelectMap';
+import { HintModal } from './components/HintModal';
+import { LevelClearModal } from './components/LevelClearModal';
+import { DatabaseViewerModal } from './components/DatabaseViewerModal';
+import { InteractivePuzzle } from './components/InteractivePuzzle';
+
+import {
+  BrainCircuit,
+  Lightbulb,
+  CheckCircle2,
+  XCircle,
+  ArrowRight,
+  ArrowLeft,
+  RotateCcw,
+  Sparkles,
+  HelpCircle,
+  Coins,
+  Star,
+  Send,
+  Delete,
+  CornerDownLeft,
+  Compass,
+  AlertCircle
+} from 'lucide-react';
 
 export default function App() {
-  const [currentStep, setCurrentStep] = useState<AppStep>('camera');
-  const [lastScanStep, setLastScanStep] = useState<'camera' | 'crop' | 'filter' | 'pages'>('camera');
-
-  // Multi-page document state
-  const [pages, setPages] = useState<PageItem[]>([]);
-  const [editingPageIndex, setEditingPageIndex] = useState<number | null>(null);
-
-  // Active snapshot being processed
-  const [currentRawImage, setCurrentRawImage] = useState<string>('');
-  const [currentDetectedQuad, setCurrentDetectedQuad] = useState<Quad | undefined>(undefined);
-  const [warpedCanvas, setWarpedCanvas] = useState<HTMLCanvasElement | null>(null);
-
-  // Batch import progress state
-  const [isBatchProcessing, setIsBatchProcessing] = useState<boolean>(false);
-  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
-
-  // Total synced documents count (for nav badge)
-  const [syncedDocCount, setSyncedDocCount] = useState<number>(0);
+  const [stats, setStats] = useState<PlayerStats>(() => loadPlayerStats());
+  const [activeLevelId, setActiveLevelId] = useState<number>(() => {
+    const loaded = loadPlayerStats();
+    return loaded.currentLevel || 1;
+  });
 
   // Modals state
-  const [showExportModal, setShowExportModal] = useState<boolean>(false);
-  const [showSavedDocsModal, setShowSavedDocsModal] = useState<boolean>(false);
-  const [driveBackupData, setDriveBackupData] = useState<{
-    fileName: string;
-    fileSizeKb: number;
-    base64Pdf: string;
-  } | null>(null);
+  const [showMap, setShowMap] = useState<boolean>(false);
+  const [showDatabase, setShowDatabase] = useState<boolean>(false);
+  const [showHintModal, setShowHintModal] = useState<boolean>(false);
+  const [showClearModal, setShowClearModal] = useState<boolean>(false);
+  const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
 
-  // Toast / Notification
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  // Active level state
+  const [userInput, setUserInput] = useState<string>('');
+  const [feedback, setFeedback] = useState<{ type: 'correct' | 'wrong' | null; message: string }>({
+    type: null,
+    message: '',
+  });
+  const [attempts, setAttempts] = useState<number>(0);
+  const [hintsUsed, setHintsUsed] = useState<{ hint1: boolean; hint2: boolean; solution: boolean }>({
+    hint1: false,
+    hint2: false,
+    solution: false,
+  });
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage(null);
-    }, 3200);
-  };
+  // Level Clear Celebration Data
+  const [clearData, setClearData] = useState<{
+    stars: number;
+    earnedCoins: number;
+    timeSpentSec: number;
+  }>({
+    stars: 3,
+    earnedCoins: 25,
+    timeSpentSec: 0,
+  });
 
-  // Poll synced documents count for header badge
+  // Timer
+  const [timerSec, setTimerSec] = useState<number>(0);
+  const [isTimerRunning, setIsTimerRunning] = useState<boolean>(true);
+
+  // Current Level Object
+  const currentLevel: LevelData =
+    ALL_LEVELS.find((l) => l.id === activeLevelId) || ALL_LEVELS[0];
+  const currentTierInfo =
+    TIERS.find((t) => t.id === currentLevel.tier) || TIERS[0];
+  const totalStars = calculateTotalStars(stats.progress);
+
+  // Save stats on change
   useEffect(() => {
-    const updateCount = async () => {
-      try {
-        const docs = await fetchDocumentsCrossDevice();
-        setSyncedDocCount(docs.length);
-      } catch {
-        // ignore
-      }
-    };
-    updateCount();
-    const interval = setInterval(updateCount, 10000);
-    return () => clearInterval(interval);
-  }, [showExportModal]);
+    savePlayerStats(stats);
+  }, [stats]);
 
-  // Track scan step when not in directory
+  // Reset input & timer when active level changes
   useEffect(() => {
-    if (currentStep !== 'directory') {
-      setLastScanStep(currentStep);
-    }
-  }, [currentStep]);
+    setUserInput('');
+    setFeedback({ type: null, message: '' });
+    setAttempts(0);
+    setTimerSec(0);
+    setIsTimerRunning(true);
 
-  // 1. Captured from Camera or Gallery or Sample Doc
-  const handleCaptureImage = (dataUrl: string, detectedQuad?: Quad) => {
-    setCurrentRawImage(dataUrl);
-    setCurrentDetectedQuad(detectedQuad);
-    setEditingPageIndex(null);
-    setCurrentStep('crop');
-  };
-
-  // Batch Gallery Import Handler
-  const handleBatchCaptureImages = async (dataUrls: string[]) => {
-    setIsBatchProcessing(true);
-    setBatchProgress({ current: 0, total: dataUrls.length });
-
-    const newPages: PageItem[] = [];
-
-    for (let i = 0; i < dataUrls.length; i++) {
-      setBatchProgress({ current: i + 1, total: dataUrls.length });
-      const dataUrl = dataUrls[i];
-      try {
-        const img = new Image();
-        img.src = dataUrl;
-        await new Promise((resolve) => {
-          img.onload = resolve;
-        });
-
-        const w = img.naturalWidth || img.width;
-        const h = img.naturalHeight || img.height;
-        const detectedQuad = detectDocumentCorners(img, w, h);
-        const warped = await warpPerspective(img, detectedQuad);
-        const filtered = applyFilter(warped, 'magic', 0, 0, 0);
-        const processedDataUrl = filtered.toDataURL('image/jpeg', 0.92);
-        const thumbnailUrl = generateThumbnail(filtered, 200);
-
-        newPages.push({
-          id: 'page_' + Date.now() + '_' + i + '_' + Math.random().toString(36).substring(2, 6),
-          originalDataUrl: dataUrl,
-          originalWidth: w,
-          originalHeight: h,
-          cropQuad: detectedQuad,
-          filter: 'magic',
-          brightness: 0,
-          contrast: 0,
-          rotation: 0,
-          processedDataUrl,
-          thumbnailUrl,
-        });
-      } catch (e) {
-        console.error('Batch process error for image', i, e);
-      }
-    }
-
-    setPages((prev) => [...prev, ...newPages]);
-    setIsBatchProcessing(false);
-    setCurrentStep('pages');
-    showToast(`Berhasil mengimpor ${newPages.length} foto dari galeri!`);
-  };
-
-  const handleImportGalleryFiles = async (files: FileList) => {
-    const urls: string[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const url = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (e) => resolve(e.target?.result as string);
-        reader.readAsDataURL(files[i]);
+    // Retrieve previous hints used if completed or cached
+    const existingProgress = stats.progress[activeLevelId];
+    if (existingProgress) {
+      setHintsUsed({
+        hint1: Boolean(existingProgress.hint1Used),
+        hint2: Boolean(existingProgress.hint2Used),
+        solution: Boolean(existingProgress.solutionUsed),
       });
-      if (url) urls.push(url);
-    }
-    if (urls.length === 1) {
-      handleCaptureImage(urls[0]);
-    } else if (urls.length > 1) {
-      handleBatchCaptureImages(urls);
-    }
-  };
-
-  // 2. Applied Crop Corners -> Execute Perspective Transform (Warp)
-  const handleApplyCrop = async (quad: Quad) => {
-    try {
-      const img = new Image();
-      img.src = currentRawImage;
-      await new Promise((resolve) => {
-        img.onload = resolve;
-      });
-
-      const warped = await warpPerspective(img, quad);
-      setWarpedCanvas(warped);
-      setCurrentStep('filter');
-    } catch (err) {
-      console.error('Perspective transform error:', err);
-      showToast('Gagal meratakan perspektif dokumen.');
-    }
-  };
-
-  // 3. Saved Filtered Page -> Add to Pages list
-  const handleSaveFilteredPage = (
-    processedDataUrl: string,
-    thumbnailUrl: string,
-    settings: {
-      filter: FilterType;
-      brightness: number;
-      contrast: number;
-      rotation: number;
-    }
-  ) => {
-    if (editingPageIndex !== null && pages[editingPageIndex]) {
-      // Update existing page
-      setPages((prev) => {
-        const copy = [...prev];
-        copy[editingPageIndex] = {
-          ...copy[editingPageIndex],
-          filter: settings.filter,
-          brightness: settings.brightness,
-          contrast: settings.contrast,
-          rotation: settings.rotation,
-          processedDataUrl,
-          thumbnailUrl,
-        };
-        return copy;
-      });
-      showToast('Halaman berhasil diperbarui!');
     } else {
-      // Add new page
-      const newPage: PageItem = {
-        id: 'page_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-        originalDataUrl: currentRawImage,
-        originalWidth: warpedCanvas ? warpedCanvas.width : 1000,
-        originalHeight: warpedCanvas ? warpedCanvas.height : 1400,
-        cropQuad: currentDetectedQuad || getDefaultQuad(1000, 1400),
-        filter: settings.filter,
-        brightness: settings.brightness,
-        contrast: settings.contrast,
-        rotation: settings.rotation,
-        processedDataUrl,
-        thumbnailUrl,
+      setHintsUsed({ hint1: false, hint2: false, solution: false });
+    }
+  }, [activeLevelId]);
+
+  // Timer interval
+  useEffect(() => {
+    if (!isTimerRunning) return;
+    const interval = setInterval(() => {
+      setTimerSec((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isTimerRunning]);
+
+  // Format timer
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Sound toggle
+  const handleToggleSound = () => {
+    const nextSound = !stats.soundEnabled;
+    playTap(nextSound);
+    setStats((prev) => ({ ...prev, soundEnabled: nextSound }));
+  };
+
+  // Switch level
+  const handleSelectLevel = (levelId: number) => {
+    if (levelId > stats.unlockedLevel) return;
+    setActiveLevelId(levelId);
+    setStats((prev) => ({ ...prev, currentLevel: levelId }));
+    setShowMap(false);
+  };
+
+  // Complete level
+  const handleLevelCompleted = useCallback(() => {
+    setIsTimerRunning(false);
+    playCorrect(stats.soundEnabled);
+
+    const calculatedStars = calculateStarRating(hintsUsed, timerSec, attempts);
+    const existing = stats.progress[activeLevelId];
+    const prevStars = existing?.stars || 0;
+    const finalStars = Math.max(calculatedStars, prevStars);
+
+    // Coins reward: base 25, bonus 10 for 3 stars
+    const bonusCoins = finalStars === 3 ? 35 : finalStars === 2 ? 25 : 15;
+
+    setClearData({
+      stars: calculatedStars,
+      earnedCoins: bonusCoins,
+      timeSpentSec: timerSec,
+    });
+
+    const nextUnlocked = Math.max(stats.unlockedLevel, Math.min(activeLevelId + 1, 100));
+
+    setStats((prev) => {
+      const nextProgress = {
+        ...prev.progress,
+        [activeLevelId]: {
+          levelId: activeLevelId,
+          completed: true,
+          stars: finalStars,
+          bestTimeSec:
+            existing?.bestTimeSec && existing.bestTimeSec < timerSec
+              ? existing.bestTimeSec
+              : timerSec,
+          hint1Used: hintsUsed.hint1,
+          hint2Used: hintsUsed.hint2,
+          solutionUsed: hintsUsed.solution,
+          completedAt: new Date().toISOString(),
+        },
       };
 
-      setPages((prev) => [...prev, newPage]);
-      showToast(`Halaman ${pages.length + 1} berhasil ditambahkan!`);
-    }
-
-    setEditingPageIndex(null);
-    setCurrentStep('pages');
-  };
-
-  // Navigation handlers
-  const handleEditCropForPage = (index: number) => {
-    const page = pages[index];
-    if (!page) return;
-    setEditingPageIndex(index);
-    setCurrentRawImage(page.originalDataUrl);
-    setCurrentDetectedQuad(page.cropQuad);
-    setCurrentStep('crop');
-  };
-
-  const handleEditFilterForPage = async (index: number) => {
-    const page = pages[index];
-    if (!page) return;
-    setEditingPageIndex(index);
-    try {
-      const img = new Image();
-      img.src = page.originalDataUrl;
-      await new Promise((resolve) => {
-        img.onload = resolve;
-      });
-      const warped = await warpPerspective(img, page.cropQuad);
-      setWarpedCanvas(warped);
-      setCurrentStep('filter');
-    } catch {
-      showToast('Gagal memuat editor filter.');
-    }
-  };
-
-  const handleDeletePage = (index: number) => {
-    setPages((prev) => prev.filter((_, i) => i !== index));
-    showToast('Halaman dihapus.');
-  };
-
-  const handleReorderPages = (from: number, to: number) => {
-    setPages((prev) => {
-      const copy = [...prev];
-      const [moved] = copy.splice(from, 1);
-      copy.splice(to, 0, moved);
-      return copy;
+      return {
+        ...prev,
+        coins: prev.coins + bonusCoins,
+        unlockedLevel: nextUnlocked,
+        currentLevel: activeLevelId,
+        progress: nextProgress,
+      };
     });
+
+    setShowClearModal(true);
+  }, [hintsUsed, timerSec, attempts, stats.progress, stats.soundEnabled, stats.unlockedLevel, activeLevelId]);
+
+  // Answer normalizer
+  const normalize = (str: string) => {
+    return str
+      .trim()
+      .toLowerCase()
+      .replace(/[\s\-_.,/]/g, '');
   };
 
-  // Open existing document from saved docs modal / directory
-  const handleOpenSavedDocument = (doc: ScannedDocument) => {
-    if (doc.pages && doc.pages.length > 0) {
-      setPages(doc.pages);
-      setShowSavedDocsModal(false);
-      setCurrentStep('pages');
-      showToast(`Membuka "${doc.title}" (${doc.pages.length} halaman)`);
+  // Submit Answer
+  const handleSubmitAnswer = (rawAnswer?: string) => {
+    const given = rawAnswer !== undefined ? rawAnswer : userInput;
+    if (!given.toString().trim()) return;
+
+    const accepted = Array.isArray(currentLevel.answer)
+      ? currentLevel.answer
+      : [currentLevel.answer];
+
+    const isMatch = accepted.some((ans) => {
+      if (typeof ans === 'number') {
+        const num = parseFloat(given.toString().replace(/,/g, '.'));
+        return !isNaN(num) && num === ans;
+      }
+      return normalize(given.toString()) === normalize(ans.toString());
+    });
+
+    if (isMatch) {
+      setFeedback({ type: 'correct', message: 'Jawaban Benar! Kerja logika yang luar biasa!' });
+      handleLevelCompleted();
     } else {
-      showToast(`Dokumen "${doc.title}" siap diunduh`);
+      playWrong(stats.soundEnabled);
+      setAttempts((prev) => prev + 1);
+      setFeedback({
+        type: 'wrong',
+        message: 'Jawaban kurang tepat. Pikirkan kembali atau gunakan Hint jika buntu!',
+      });
+      setTimeout(() => {
+        setFeedback((prev) => (prev.type === 'wrong' ? { type: null, message: '' } : prev));
+      }, 3000);
     }
   };
 
-  const handleStartFreshScan = () => {
-    setPages([]);
-    setEditingPageIndex(null);
-    setCurrentStep('camera');
+  // Unlock hint
+  const handleUnlockHint = (type: 'hint1' | 'hint2' | 'solution', cost: number) => {
+    setStats((prev) => ({
+      ...prev,
+      coins: Math.max(0, prev.coins - cost),
+    }));
+
+    setHintsUsed((prev) => ({
+      ...prev,
+      [type]: true,
+    }));
   };
+
+  // Next level action
+  const handleNextLevel = () => {
+    setShowClearModal(false);
+    if (activeLevelId < 100) {
+      setActiveLevelId((prev) => prev + 1);
+      setStats((prev) => ({ ...prev, currentLevel: activeLevelId + 1 }));
+    } else {
+      setShowMap(true);
+    }
+  };
+
+  // Reset Progress
+  const handleResetAllProgress = () => {
+    playTap(stats.soundEnabled);
+    localStorage.removeItem('100_steps_of_logic_player_save_v1');
+    setStats({
+      coins: 100,
+      currentLevel: 1,
+      unlockedLevel: 1,
+      progress: {},
+      soundEnabled: stats.soundEnabled,
+    });
+    setActiveLevelId(1);
+    setShowResetConfirm(false);
+  };
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if in input
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+        if (e.key === 'Enter') {
+          handleSubmitAnswer();
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowRight' && activeLevelId < stats.unlockedLevel) {
+        setActiveLevelId((prev) => prev + 1);
+      } else if (e.key === 'ArrowLeft' && activeLevelId > 1) {
+        setActiveLevelId((prev) => prev - 1);
+      } else if (e.key.toLowerCase() === 'h') {
+        setShowHintModal(true);
+      } else if (e.key.toLowerCase() === 'm') {
+        setShowMap(true);
+      } else if (currentLevel.type === 'multiple_choice' && currentLevel.options) {
+        const keyNum = parseInt(e.key, 10);
+        if (keyNum >= 1 && keyNum <= currentLevel.options.length) {
+          playTap(stats.soundEnabled);
+          handleSubmitAnswer(currentLevel.options[keyNum - 1]);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeLevelId, stats.unlockedLevel, currentLevel, userInput]);
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-slate-900/95 border border-emerald-500/50 text-emerald-400 text-xs font-bold shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-4">
-          {toastMessage}
-        </div>
-      )}
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-['Plus_Jakarta_Sans',sans-serif] selection:bg-amber-400 selection:text-slate-950">
+      {/* 1. Header Bar */}
+      <GameHeader
+        stats={stats}
+        currentTier={currentLevel.tier}
+        totalStars={totalStars}
+        onOpenMap={() => setShowMap(true)}
+        onOpenDatabase={() => setShowDatabase(true)}
+        onToggleSound={handleToggleSound}
+        onResetProgress={() => setShowResetConfirm(true)}
+      />
 
-      {/* Batch Processing Overlay */}
-      {isBatchProcessing && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center">
-          <div className="w-16 h-16 rounded-3xl bg-slate-900 border border-emerald-500/40 flex items-center justify-center mb-4 shadow-xl">
-            <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
-          </div>
-          <h3 className="text-base font-bold text-white mb-1">
-            Mengimpor & Meratakan Gambar dari Galeri...
-          </h3>
-          <p className="text-xs text-slate-400 mb-3">
-            Memproses foto {batchProgress.current} dari {batchProgress.total} dengan koreksi perspektif & Magic Color
-          </p>
-          <div className="w-48 h-2 bg-slate-800 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-emerald-500 transition-all duration-300"
-              style={{
-                width: `${batchProgress.total ? (batchProgress.current / batchProgress.total) * 100 : 0}%`,
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Main Viewport Container */}
-      <div className="flex-1 flex flex-col overflow-hidden relative">
-        {/* Step: Directory / Daftar Berkas Semua Perangkat */}
-        {currentStep === 'directory' && (
-          <DocumentDirectoryView
-            onOpenDocumentForEditing={handleOpenSavedDocument}
-            onStartNewScan={handleStartFreshScan}
-            onSwitchToCamera={() => setCurrentStep('camera')}
-          />
-        )}
-
-        {/* Step: Camera Scanner */}
-        {currentStep === 'camera' && (
-          <CameraView
-            onCaptureImage={handleCaptureImage}
-            onBatchCaptureImages={handleBatchCaptureImages}
-            currentPageCount={pages.length}
-            onOpenSavedDocs={() => setCurrentStep('directory')}
-            onOpenPageManager={() => setCurrentStep('pages')}
-          />
-        )}
-
-        {/* Step: Crop Editor */}
-        {currentStep === 'crop' && (
-          <CropEditor
-            originalDataUrl={currentRawImage}
-            initialQuad={currentDetectedQuad}
-            onApplyCrop={handleApplyCrop}
-            onCancel={() => {
-              if (pages.length > 0) {
-                setCurrentStep('pages');
-              } else {
-                setCurrentStep('camera');
-              }
-            }}
-          />
-        )}
-
-        {/* Step: Filter Editor */}
-        {currentStep === 'filter' && warpedCanvas && (
-          <FilterEditor
-            warpedCanvas={warpedCanvas}
-            initialFilter={
-              editingPageIndex !== null && pages[editingPageIndex]
-                ? pages[editingPageIndex].filter
-                : 'magic'
-            }
-            initialBrightness={
-              editingPageIndex !== null && pages[editingPageIndex]
-                ? pages[editingPageIndex].brightness
-                : 0
-            }
-            initialContrast={
-              editingPageIndex !== null && pages[editingPageIndex]
-                ? pages[editingPageIndex].contrast
-                : 0
-            }
-            initialRotation={
-              editingPageIndex !== null && pages[editingPageIndex]
-                ? pages[editingPageIndex].rotation
-                : 0
-            }
-            onSave={handleSaveFilteredPage}
-            onBackToCrop={() => setCurrentStep('crop')}
-          />
-        )}
-
-        {/* Step: Multi-Page Manager */}
-        {currentStep === 'pages' && (
-          <PageListManager
-            pages={pages}
-            onAddPage={() => setCurrentStep('camera')}
-            onImportGallery={handleImportGalleryFiles}
-            onEditCrop={handleEditCropForPage}
-            onEditFilter={handleEditFilterForPage}
-            onDeletePage={handleDeletePage}
-            onReorderPages={handleReorderPages}
-            onProceedToExport={() => setShowExportModal(true)}
-            onBackToCamera={() => setCurrentStep('camera')}
-          />
-        )}
-      </div>
-
-      {/* Primary Global Navigation Bar (Bottom Dock) */}
-      <nav className="relative z-30 bg-slate-900/95 border-t border-slate-800/90 backdrop-blur-md px-6 py-2.5 flex items-center justify-around shadow-2xl">
-        {/* Nav Button 1: Pindai Dokumen (Scanner) */}
-        <button
-          onClick={() => {
-            if (currentStep === 'directory') {
-              setCurrentStep(lastScanStep);
-            }
-          }}
-          className={`flex items-center gap-2 px-5 py-2 rounded-2xl transition font-semibold text-xs ${
-            currentStep !== 'directory'
-              ? 'bg-emerald-500 text-slate-950 font-bold shadow-lg shadow-emerald-500/25'
-              : 'text-slate-400 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <Camera className="w-4 h-4" />
-          <span>Pindai Dokumen</span>
-          {pages.length > 0 && currentStep === 'directory' && (
-            <span className="w-5 h-5 rounded-full bg-emerald-400 text-slate-950 text-[10px] font-bold flex items-center justify-center">
-              {pages.length}
+      {/* 2. Main Game Viewport */}
+      <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 flex flex-col justify-between gap-6">
+        {/* Tier & Level Breadcrumb Bar */}
+        <div className="flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2">
+            <span className="font-mono font-bold text-amber-400 text-sm">
+              Langkah #{currentLevel.id}
             </span>
+            <span className="text-slate-600">/</span>
+            <span className="text-slate-400 font-medium">100 Level</span>
+            <span className="hidden sm:inline text-slate-600">·</span>
+            <span className="hidden sm:inline text-slate-400 font-semibold">{currentLevel.category}</span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Live Timer */}
+            <div className="font-mono text-xs font-semibold text-slate-400 bg-slate-900 px-3 py-1 rounded-xl border border-slate-800">
+              Waktu: <span className="text-amber-300">{formatTime(timerSec)}</span>
+            </div>
+
+            {/* Stars Potential Preview */}
+            <div className="flex items-center gap-0.5">
+              {[1, 2, 3].map((starIdx) => {
+                const currentRating = calculateStarRating(hintsUsed, timerSec, attempts);
+                const hasStar = starIdx <= currentRating;
+                return (
+                  <Star
+                    key={starIdx}
+                    className={`w-4 h-4 transition-colors ${
+                      hasStar ? 'text-amber-400 fill-amber-400' : 'text-slate-800'
+                    }`}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Puzzle Card Container */}
+        <div className="w-full bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-8 shadow-2xl flex flex-col gap-6 relative overflow-hidden">
+          {/* Subtle Ambient Glow */}
+          <div className="absolute top-0 right-0 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
+
+          {/* Level Title & Header */}
+          <div className="flex flex-col gap-1.5 border-b border-slate-800/80 pb-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                {currentTierInfo.name} · {currentTierInfo.levelRange}
+              </span>
+              {stats.progress[activeLevelId]?.completed && (
+                <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Terselesaikan
+                </span>
+              )}
+            </div>
+
+            <h2 className="text-lg sm:text-2xl font-black text-white tracking-tight">
+              {currentLevel.title}
+            </h2>
+          </div>
+
+          {/* Question / Prompt */}
+          <div className="text-sm sm:text-base text-slate-200 leading-relaxed font-medium bg-slate-950/50 p-4 sm:p-5 rounded-2xl border border-slate-800/60">
+            {currentLevel.prompt}
+          </div>
+
+          {/* Puzzle Input Area based on Type */}
+          <div className="w-full flex flex-col gap-4">
+            {/* TYPE 1: MULTIPLE CHOICE */}
+            {currentLevel.type === 'multiple_choice' && currentLevel.options && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {currentLevel.options.map((option, idx) => {
+                  const letter = String.fromCharCode(65 + idx); // A, B, C, D
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        playTap(stats.soundEnabled);
+                        handleSubmitAnswer(option);
+                      }}
+                      className="group flex items-center gap-3.5 p-4 rounded-2xl bg-slate-950 hover:bg-slate-800/90 border border-slate-800 hover:border-amber-400/60 text-left transition-all transform active:scale-98 shadow-sm cursor-pointer"
+                    >
+                      <span className="w-8 h-8 rounded-xl bg-slate-900 group-hover:bg-amber-400 group-hover:text-slate-950 text-amber-400 font-mono font-bold text-xs flex items-center justify-center border border-slate-700 transition-colors">
+                        {letter}
+                      </span>
+                      <span className="text-sm font-semibold text-slate-200 group-hover:text-white">
+                        {option}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* TYPE 2: NUMBER INPUT */}
+            {currentLevel.type === 'number_input' && (
+              <div className="flex flex-col items-center gap-4">
+                {/* Numeric Input Display */}
+                <div className="w-full max-w-sm flex items-center gap-2">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={userInput}
+                    onChange={(e) => setUserInput(e.target.value)}
+                    placeholder="Ketik angka jawaban..."
+                    className="flex-1 px-4 py-3 rounded-2xl bg-slate-950 border border-slate-800 text-lg font-mono font-bold text-center text-amber-400 placeholder-slate-600 focus:outline-none focus:border-amber-400"
+                  />
+                  <button
+                    onClick={() => handleSubmitAnswer()}
+                    className="px-5 py-3 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition transform active:scale-95 flex items-center gap-1.5"
+                  >
+                    <span>Jawab</span>
+                    <Send className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* On-Screen Keypad for Touch / Mobile */}
+                <div className="grid grid-cols-3 gap-2 w-full max-w-xs pt-2">
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                    <button
+                      key={num}
+                      onClick={() => {
+                        playTap(stats.soundEnabled);
+                        setUserInput((prev) => prev + num.toString());
+                      }}
+                      className="py-3 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-sm font-mono font-bold text-white transition active:scale-95"
+                    >
+                      {num}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => {
+                      playTap(stats.soundEnabled);
+                      setUserInput('');
+                    }}
+                    className="py-3 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-xs font-bold text-rose-400 transition"
+                  >
+                    C
+                  </button>
+                  <button
+                    onClick={() => {
+                      playTap(stats.soundEnabled);
+                      setUserInput((prev) => prev + '0');
+                    }}
+                    className="py-3 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-sm font-mono font-bold text-white transition active:scale-95"
+                  >
+                    0
+                  </button>
+                  <button
+                    onClick={() => {
+                      playTap(stats.soundEnabled);
+                      setUserInput((prev) => prev.slice(0, -1));
+                    }}
+                    className="py-3 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 flex items-center justify-center text-slate-400 transition"
+                  >
+                    <Delete className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* TYPE 3: TEXT INPUT */}
+            {currentLevel.type === 'text_input' && (
+              <div className="w-full max-w-md mx-auto flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={userInput}
+                    onChange={(e) => setUserInput(e.target.value)}
+                    placeholder="Ketik jawaban kata / teks..."
+                    className="flex-1 px-4 py-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-semibold text-white placeholder-slate-600 focus:outline-none focus:border-amber-400"
+                  />
+                  <button
+                    onClick={() => handleSubmitAnswer()}
+                    className="px-5 py-3 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition transform active:scale-95 flex items-center gap-1.5"
+                  >
+                    <span>Kirim</span>
+                    <CornerDownLeft className="w-4 h-4" />
+                  </button>
+                </div>
+                <span className="text-[11px] text-slate-500 text-center">
+                  Tip: Jawaban tidak membedakan huruf besar/kecil.
+                </span>
+              </div>
+            )}
+
+            {/* TYPE 4: INTERACTIVE PUZZLE */}
+            {currentLevel.type === 'interactive' && (
+              <InteractivePuzzle
+                level={currentLevel}
+                soundEnabled={stats.soundEnabled}
+                onSolve={handleLevelCompleted}
+              />
+            )}
+          </div>
+
+          {/* Feedback Banner */}
+          {feedback.message && (
+            <div
+              className={`p-3 rounded-2xl text-xs font-semibold flex items-center justify-center gap-2 transition animate-in fade-in ${
+                feedback.type === 'correct'
+                  ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                  : 'bg-rose-500/15 border border-rose-500/30 text-rose-400'
+              }`}
+            >
+              {feedback.type === 'correct' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <XCircle className="w-4 h-4 shrink-0" />
+              )}
+              <span>{feedback.message}</span>
+            </div>
           )}
-        </button>
 
-        {/* Nav Button 2: Daftar Berkas (Semua Perangkat) */}
-        <button
-          onClick={() => setCurrentStep('directory')}
-          className={`flex items-center gap-2 px-5 py-2 rounded-2xl transition font-semibold text-xs ${
-            currentStep === 'directory'
-              ? 'bg-emerald-500 text-slate-950 font-bold shadow-lg shadow-emerald-500/25'
-              : 'text-slate-400 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <FolderOpen className="w-4 h-4" />
-          <span>Daftar Berkas</span>
-          <span
-            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-              currentStep === 'directory'
-                ? 'bg-slate-950 text-emerald-300'
-                : 'bg-slate-800 text-slate-300 border border-slate-700'
-            }`}
+          {/* Attempts counter if > 0 */}
+          {attempts > 0 && !stats.progress[activeLevelId]?.completed && (
+            <div className="text-center text-[11px] text-slate-500">
+              Percobaan gagal: <span className="font-mono text-amber-400">{attempts}</span> kali.
+            </div>
+          )}
+        </div>
+
+        {/* 3. Bottom Controls & Action Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+          {/* Left: Previous Level */}
+          <button
+            disabled={activeLevelId <= 1}
+            onClick={() => {
+              playTap(stats.soundEnabled);
+              setActiveLevelId((prev) => prev - 1);
+            }}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none border border-slate-800 text-xs font-semibold text-slate-300 transition"
           >
-            {syncedDocCount}
-          </span>
-        </button>
-      </nav>
+            <ArrowLeft className="w-4 h-4" />
+            <span className="hidden sm:inline">Level Sebelumnya</span>
+          </button>
 
-      {/* PDF Export & File Renaming Modal */}
-      {showExportModal && (
-        <PdfExportModal
-          pages={pages}
-          onClose={() => setShowExportModal(false)}
-          onOpenDriveBackup={(data) => {
-            setShowExportModal(false);
-            setDriveBackupData(data);
+          {/* Center: Hint Trigger Button */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                playTap(stats.soundEnabled);
+                setShowHintModal(true);
+              }}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-bold transition shadow-sm"
+            >
+              <Lightbulb className="w-4 h-4 text-amber-400" />
+              <span>Buka Petunjuk</span>
+              {hintsUsed.hint1 && <span className="text-[10px] text-emerald-400">· H1 Aktif</span>}
+              {hintsUsed.hint2 && <span className="text-[10px] text-emerald-400">· H2 Aktif</span>}
+            </button>
+          </div>
+
+          {/* Right: Next Level */}
+          <button
+            disabled={activeLevelId >= stats.unlockedLevel || activeLevelId >= 100}
+            onClick={() => {
+              playTap(stats.soundEnabled);
+              setActiveLevelId((prev) => prev + 1);
+            }}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none border border-slate-800 text-xs font-semibold text-slate-300 transition"
+          >
+            <span className="hidden sm:inline">Level Berikutnya</span>
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      </main>
+
+      {/* 4. MODALS */}
+
+      {/* Level Select Map */}
+      {showMap && (
+        <LevelSelectMap
+          unlockedLevel={stats.unlockedLevel}
+          currentLevel={activeLevelId}
+          progress={stats.progress}
+          soundEnabled={stats.soundEnabled}
+          onSelectLevel={handleSelectLevel}
+          onClose={() => setShowMap(false)}
+        />
+      )}
+
+      {/* Hint & Solution Modal */}
+      {showHintModal && (
+        <HintModal
+          level={currentLevel}
+          playerCoins={stats.coins}
+          unlockedHints={hintsUsed}
+          soundEnabled={stats.soundEnabled}
+          onUnlockHint={handleUnlockHint}
+          onClose={() => setShowHintModal(false)}
+        />
+      )}
+
+      {/* Level Clear Celebration Modal */}
+      {showClearModal && (
+        <LevelClearModal
+          level={currentLevel}
+          stars={clearData.stars}
+          earnedCoins={clearData.earnedCoins}
+          timeSpentSec={clearData.timeSpentSec}
+          soundEnabled={stats.soundEnabled}
+          onNextLevel={handleNextLevel}
+          onReplay={() => {
+            setShowClearModal(false);
+            setUserInput('');
+            setFeedback({ type: null, message: '' });
           }}
-          onSavedSuccessfully={() => {
-            showToast('Dokumen tersimpan & tersinkronisasi ke semua perangkat!');
-            setCurrentStep('directory');
+          onOpenMap={() => {
+            setShowClearModal(false);
+            setShowMap(true);
           }}
         />
       )}
 
-      {/* Saved Documents Library Modal (Secondary) */}
-      {showSavedDocsModal && (
-        <SavedDocsModal
-          onClose={() => setShowSavedDocsModal(false)}
-          onOpenDocument={handleOpenSavedDocument}
-          onStartNewScan={() => {
-            setShowSavedDocsModal(false);
-            setCurrentStep('camera');
+      {/* 100-Level Database & JSON Exporter */}
+      {showDatabase && (
+        <DatabaseViewerModal
+          soundEnabled={stats.soundEnabled}
+          onClose={() => setShowDatabase(false)}
+          onJumpToLevel={(id) => {
+            setShowDatabase(false);
+            if (id <= stats.unlockedLevel) {
+              setActiveLevelId(id);
+            }
           }}
         />
       )}
 
-      {/* Google Drive Backup Modal */}
-      {driveBackupData && (
-        <DriveBackupModal
-          fileName={driveBackupData.fileName}
-          fileSizeKb={driveBackupData.fileSizeKb}
-          base64Pdf={driveBackupData.base64Pdf}
-          onClose={() => setDriveBackupData(null)}
-        />
+      {/* Reset Progress Confirmation Dialog */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+          <div className="relative w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl flex flex-col gap-4 text-center">
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 mx-auto">
+              <RotateCcw className="w-6 h-6" />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <h3 className="text-base font-bold text-white">Reset Semua Progres?</h3>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Tindakan ini akan mengulang progres dari Level 1 dan mengembalikan koin ke 100.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                onClick={() => setShowResetConfirm(false)}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handleResetAllProgress}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/20 transition"
+              >
+                Ya, Reset
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

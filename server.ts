@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 
+import { ALL_LEVELS, TIERS } from './src/data/levels.ts';
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -14,6 +16,31 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '50mb' }));
+
+// GET /api/levels - Retrieve 100 Steps of Logic puzzle database
+app.get('/api/levels', (req, res) => {
+  const { tier } = req.query;
+  if (tier && typeof tier === 'string') {
+    const filtered = ALL_LEVELS.filter((l) => l.tier === tier);
+    return res.json({ success: true, count: filtered.length, levels: filtered, tiers: TIERS });
+  }
+  res.json({
+    success: true,
+    count: ALL_LEVELS.length,
+    tiers: TIERS,
+    levels: ALL_LEVELS
+  });
+});
+
+// GET /api/levels/:id - Retrieve specific level
+app.get('/api/levels/:id', (req, res) => {
+  const levelId = parseInt(req.params.id, 10);
+  const level = ALL_LEVELS.find((l) => l.id === levelId);
+  if (!level) {
+    return res.status(404).json({ success: false, error: 'Level not found' });
+  }
+  res.json({ success: true, level });
+});
 
 // Persistent storage file path for documents
 const DATA_DIR = path.resolve(__dirname, 'data');

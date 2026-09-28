@@ -1,9 +1,7 @@
 {
   "name": "scandocapp",
-  "description": "Pemindaian dokumen cerdas, deteksi tepi otomatis, koreksi perspektif 4 sudut, filter Magic Color, OCR, dan konversi PDF multi-halaman.",
-  "requestFramePermissions": [
-    "camera"
-  ],
+  "description": "Game teka-teki logika interaktif 100 Steps of Logic dengan 100 level unik, sistem hint bertingkat, skor bintang, dan beragam teka-teki visual & interaktif.",
+  "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
